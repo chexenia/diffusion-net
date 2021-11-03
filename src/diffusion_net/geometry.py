@@ -20,6 +20,7 @@ import potpourri3d as pp3d
 import diffusion_net.utils as utils
 from .utils import toNP
 
+import diffusion_net_cuda as dnc
 
 def norm(x, highdim=False):
     """
@@ -189,9 +190,14 @@ def build_grad_point_cloud(verts, frames, n_neighbors_cloud=30):
 
     edge_inds_from = np.repeat(np.arange(verts.shape[0]), n_neighbors_cloud)
     edges = np.stack((edge_inds_from, neigh_inds.flatten()))
+
+    # Optionally to have this on GPU earlier
     edge_tangent_vecs = edge_tangent_vectors(verts, frames, edges)
-   
-    return build_grad(verts_np, torch.tensor(edges), edge_tangent_vecs)
+    edge_tangent_vecs_cuda = edge_tangent_vecs.to('cuda:0')
+    edges_tensor_cuda = torch.tensor(edges, dtype=torch.int32, device='cuda:0')
+    verts_cuda = verts.to('cuda:0')
+
+    return build_grad_cuda(verts_cuda, edges_tensor_cuda, edge_tangent_vecs_cuda,n_neighbors_cloud,verts.device)
 
 
 def edge_tangent_vectors(verts, frames, edges):
@@ -205,73 +211,31 @@ def edge_tangent_vectors(verts, frames, edges):
 
     return edge_tangent
 
+def build_grad_cuda(verts_cuda, edges_tensor_cuda, edge_tangent_vecs, n_neighbors_cloud=30, return_device='cpu'):
+    # Grad_data currently gives additional debug information. Will be removed later.
+    grad_data = dnc.build_grad(verts_cuda, edges_tensor_cuda, edge_tangent_vecs,n_neighbors_cloud)
 
-def build_grad(verts, edges, edge_tangent_vectors):
-    """
-    Build a (V, V) complex sparse matrix grad operator. Given real inputs at vertices, produces a complex (vector value) at vertices giving the gradient. All values pointwise.
-    - edges: (2, E)
-    """
-    
-    edges_np = toNP(edges)
-    edge_tangent_vectors_np = toNP(edge_tangent_vectors)
+    # only supporting full neighbourhoods now (all vertices must have n_neighbors_cloud neighbours)
+    assert(torch.max(grad_data[4]) == torch.min(grad_data[4]))
 
-    # TODO find a way to do this in pure numpy?
+    if grad_data[0].device != return_device:
+        rows = grad_data[0].to(return_device).type(torch.LongTensor)
+        cols = grad_data[0].to(return_device).type(torch.LongTensor)
+        data_gradX = grad_data[2].to(return_device)
+        data_gradY = grad_data[3].to(return_device)
+    else:
+        rows = grad_data[0].type(torch.LongTensor)
+        cols = grad_data[0].type(torch.LongTensor)
+        data_gradX = grad_data[2]
+        data_gradY = grad_data[3]
 
-    # Build outgoing neighbor lists
-    N = verts.shape[0]
-    vert_edge_outgoing = [[] for i in range(N)]
-    for iE in range(edges_np.shape[1]):
-        tail_ind = edges_np[0, iE]
-        tip_ind = edges_np[1, iE]
-        if tip_ind != tail_ind:
-            vert_edge_outgoing[tail_ind].append(iE)
+    indices = torch.vstack((rows,cols))
+    shape = torch.Size([len(verts_cuda),len(verts_cuda)])
 
-    # Build local inversion matrix for each vertex
-    row_inds = []
-    col_inds = []
-    data_vals = []
-    eps_reg = 1e-5
-    for iV in range(N):
-        n_neigh = len(vert_edge_outgoing[iV])
+    gradX = torch.sparse.FloatTensor(indices, torch.FloatTensor(data_gradX), torch.Size(shape)).coalesce()
+    gradY = torch.sparse.FloatTensor(indices, torch.FloatTensor(data_gradY), torch.Size(shape)).coalesce()
 
-        lhs_mat = np.zeros((n_neigh, 2))
-        rhs_mat = np.zeros((n_neigh, n_neigh + 1))
-        ind_lookup = [iV]
-        for i_neigh in range(n_neigh):
-            iE = vert_edge_outgoing[iV][i_neigh]
-            jV = edges_np[1, iE]
-            ind_lookup.append(jV)
-    
-            edge_vec = edge_tangent_vectors[iE][:]
-            w_e = 1.
-
-            lhs_mat[i_neigh][:] = w_e * edge_vec
-            rhs_mat[i_neigh][0] = w_e * (-1)
-            rhs_mat[i_neigh][i_neigh + 1] = w_e * 1
-
-        lhs_T = lhs_mat.T
-        lhs_inv = np.linalg.inv(lhs_T @ lhs_mat + eps_reg * np.identity(2)) @ lhs_T
-
-        sol_mat = lhs_inv @ rhs_mat
-        sol_coefs = (sol_mat[0, :] + 1j * sol_mat[1, :]).T
-
-        for i_neigh in range(n_neigh + 1):
-            i_glob = ind_lookup[i_neigh]
-
-            row_inds.append(iV)
-            col_inds.append(i_glob)
-            data_vals.append(sol_coefs[i_neigh])
-
-    # build the sparse matrix
-    row_inds = np.array(row_inds)
-    col_inds = np.array(col_inds)
-    data_vals = np.array(data_vals)
-    mat = scipy.sparse.coo_matrix(
-        (data_vals, (row_inds, col_inds)), shape=(
-            N, N)).tocsc()
-
-    return mat
-
+    return gradX, gradY
 
 def compute_operators(verts, faces, k_eig, normals=None):
     """
@@ -370,24 +334,26 @@ def compute_operators(verts, faces, k_eig, normals=None):
 
     # For meshes, we use the same edges as were used to build the Laplacian. For point clouds, use a whole local neighborhood
     if is_cloud:
-        grad_mat_np = build_grad_point_cloud(verts, frames)
-    else:
+        gradX, gradY = build_grad_point_cloud(verts, frames)
+    else: # === WARNING DIFFUSION_NET_CUDA UNTESTED START ===
         edges = torch.tensor(np.stack((inds_row, inds_col), axis=0), device=device, dtype=faces.dtype)
         edge_vecs = edge_tangent_vectors(verts, frames, edges)
-        grad_mat_np = build_grad(verts, edges, edge_vecs)
+
+        # Optionally to have this on GPU earlier
+        #edge_tangent_vecs = edge_tangent_vectors(verts, frames, edges)
+        edge_tangent_vecs_cuda = edge_vecs.to('cuda:0')
+        edges_tensor_cuda = torch.tensor(edges, dtype=torch.int32, device='cuda:0')
+        verts_cuda = verts.to('cuda:0')
+        
+        gradX, gradY = build_grad_cuda(verts_cuda, edges_tensor_cuda, edge_tangent_vecs_cuda,return_device=verts.device)
+          # === WARNING DIFFUSION_NET_CUDA UNTESTED END ===
 
 
-    # Split complex gradient in to two real sparse mats (torch doesn't like complex sparse matrices)
-    gradX_np = np.real(grad_mat_np)
-    gradY_np = np.imag(grad_mat_np)
-    
     # === Convert back to torch
     massvec = torch.from_numpy(massvec_np).to(device=device, dtype=dtype)
     L = utils.sparse_np_to_torch(L).to(device=device, dtype=dtype)
     evals = torch.from_numpy(evals_np).to(device=device, dtype=dtype)
     evecs = torch.from_numpy(evecs_np).to(device=device, dtype=dtype)
-    gradX = utils.sparse_np_to_torch(gradX_np).to(device=device, dtype=dtype)
-    gradY = utils.sparse_np_to_torch(gradY_np).to(device=device, dtype=dtype)
 
     return frames, massvec, L, evals, evecs, gradX, gradY
 
