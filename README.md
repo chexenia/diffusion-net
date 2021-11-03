@@ -2,6 +2,11 @@
 
 CUDA implementation of certain modules in DiffusionNet (primarily aimed at pre-processing)
 
+**Setup**
+- Setup DiffusionNet as you would normally do (see below)
+- Run *python setup.py install*
+- Enjoy speedup
+
 =========================================================================
 
 **Original readme of DiffusionNet below:**
