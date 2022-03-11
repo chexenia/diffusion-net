@@ -389,7 +389,7 @@ def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=
         
     return frames, massvec, L, evals, evecs, gradX, gradY
 
-def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, overwrite_cache=False, truncate_cache=False):
+def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, overwrite_cache=False):
     """
     See documentation for compute_operators(). This essentailly just wraps a call to compute_operators, using a cache if possible.
     All arrays are always computed using double precision for stability, then truncated to single precision floats to store on disk, and finally returned as a tensor with dtype/device matching the `verts` input.
@@ -472,32 +472,9 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
                 mass = npzfile["mass"]
                 L = read_sp_mat("L")
                 evals = npzfile["evals"][:k_eig]
-                evecs = npzfile["evecs"][:, :k_eig]
+                evecs = npzfile["evecs"][:,:k_eig]
                 gradX = read_sp_mat("gradX")
                 gradY = read_sp_mat("gradY")
-
-                if truncate_cache and cache_k_eig > k_eig:
-                    print("TRUNCATING CACHE {} --> {}".format(cache_k_eig, k_eig))
-                    np.savez(search_path,
-                             verts=verts_np,
-                             frames=frames,
-                             faces=faces_np,
-                             k_eig=k_eig,
-                             mass=mass,
-                             L_data = L_np.data,
-                             L_indices = L_np.indices,
-                             L_indptr = L_np.indptr,
-                             L_shape = L_np.shape,
-                             gradX_data = gradX_np.data,
-                             gradX_indices = gradX_np.indices,
-                             gradX_indptr = gradX_np.indptr,
-                             gradX_shape = gradX_np.shape,
-                             gradY_data = gradY_np.data,
-                             gradY_indices = gradY_np.indices,
-                             gradY_indptr = gradY_np.indptr,
-                             gradY_shape = gradY_np.shape,
-                             )
-
 
                 frames = torch.from_numpy(frames).to(device=device, dtype=dtype)
                 mass = torch.from_numpy(mass).to(device=device, dtype=dtype)
@@ -621,7 +598,7 @@ def compute_hks_autoscale(evals, evecs, count):
     scales = torch.logspace(-2, 0., steps=count, device=evals.device, dtype=evals.dtype)
     return compute_hks(evals, evecs, scales)
 
-def normalize_positions(pos, method='mean'):
+def normalize_positions(pos, faces=None, method='mean', scale_method='max_rad'):
     # center and unit-scale positions
 
     if method == 'mean':
@@ -636,8 +613,21 @@ def normalize_positions(pos, method='mean'):
     else:
         raise ValueError("unrecognized method")
 
-    scale = torch.max(norm(pos), dim=-1, keepdim=True).values.unsqueeze(-1)
-    pos = pos / scale
+    if scale_method == 'max_rad':
+        scale = torch.max(norm(pos), dim=-1, keepdim=True).values.unsqueeze(-1)
+        pos = pos / scale
+    elif scale_method == 'area': 
+        if faces is None:
+            raise ValueError("must pass faces for area normalization")
+        coords = pos[faces]
+        vec_A = coords[:, 1, :] - coords[:, 0, :]
+        vec_B = coords[:, 2, :] - coords[:, 0, :]
+        face_areas = torch.norm(torch.cross(vec_A, vec_B, dim=-1), dim=1) * 0.5
+        total_area = torch.sum(face_areas)
+        scale = (1. / torch.sqrt(total_area))
+        pos = pos * scale
+    else:
+        raise ValueError("unrecognized scale method")
     return pos
 
 # Finds the k nearest neighbors of source on target.
@@ -725,27 +715,6 @@ def farthest_point_sampling(points, n_sample):
         chosen_mask[i] = True
 
     return chosen_mask
-
-
-def normalize_area_scale(verts, faces):
-    """
-    Normalizes a mesh by applying a uniform scaling such that it has surface area 0.
-    Returns only the new vertices, faces are unchagned.
-    """
-
-    # compute total surface area
-    coords = face_coords(verts, faces)
-    vec_A = coords[:, 1, :] - coords[:, 0, :]
-    vec_B = coords[:, 2, :] - coords[:, 0, :]
-    face_areas = norm(cross(vec_A, vec_B)) * 0.5
-    total_area = torch.sum(face_areas)
-
-    # scale
-    scale = (1 / torch.sqrt(total_area))
-    verts = verts * scale
-
-    return verts
-
 
 
 def geodesic_label_errors(target_verts, target_faces, pred_labels, gt_labels, normalization='diameter', geodesic_cache_dir=None):
