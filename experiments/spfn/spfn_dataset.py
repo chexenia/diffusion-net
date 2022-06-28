@@ -167,7 +167,7 @@ class SPFNDataset(Dataset):
             # to torch
             verts = torch.tensor(np.ascontiguousarray(verts)).float()
             labels = torch.tensor(np.ascontiguousarray(labels))
-            normals = torch.tensor(np.ascontiguousarray(normals))
+            normals = torch.tensor(np.ascontiguousarray(normals)).float()
 
             # center and unit scale
             verts = diffusion_net.geometry.normalize_positions(verts)

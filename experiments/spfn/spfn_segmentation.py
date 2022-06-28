@@ -223,6 +223,7 @@ if train:
 
     print(f"Finished in {time.time()-start:.2f}s.")
     print(" ==> saving last model to " + model_save_path)
+    os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
     torch.save(model.state_dict(), model_save_path)
 
 if args.command == "evaluate":
