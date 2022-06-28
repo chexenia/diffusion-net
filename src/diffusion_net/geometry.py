@@ -1,3 +1,4 @@
+import time
 import scipy
 import scipy.sparse.linalg as sla
 # ^^^ we NEED to import scipy before torch, or it crashes :(
@@ -114,7 +115,7 @@ def mesh_vertex_normals(verts, faces):
 def vertex_normals(verts, faces, n_neighbors_cloud=30):
     verts_np = toNP(verts)
 
-    if faces.numel() == 0: # point cloud
+    if faces is None or faces.numel() == 0: # point cloud
     
         _, neigh_inds = find_knn(verts, verts, n_neighbors_cloud, omit_diagonal=True, method='cpu_kd')
         neigh_points = verts_np[neigh_inds,:]
@@ -154,9 +155,10 @@ def build_tangent_frames(verts, faces, normals=None):
     dtype = verts.dtype
     device = verts.device
 
-    if normals == None:
+    if normals is None:
         vert_normals = vertex_normals(verts, faces)  # (V,3)
     else:
+        assert normals.shape[0] == V
         vert_normals = normals 
 
     # = find an orthogonal basis
@@ -303,7 +305,7 @@ def compute_operators(verts, faces, k_eig, normals=None):
     device = verts.device
     dtype = verts.dtype
     V = verts.shape[0]
-    is_cloud = faces.numel() == 0
+    is_cloud = faces is None or faces.numel() == 0
 
     eps = 1e-8
 
@@ -408,7 +410,8 @@ def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=
     # random.shuffle(inds)
    
     for num, i in enumerate(inds):
-        print("get_all_operators() processing {} / {} {:.3f}%".format(num, N, num / N * 100))
+        start = time.time()
+        print(f"get_all_operators() processing {num} / {N} {num / N * 100:.3f}% in {time.time() - start}")
         if normals is None:
             outputs = get_operators(verts_list[i], faces_list[i], k_eig, op_cache_dir)
         else:
@@ -433,7 +436,7 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
     dtype = verts.dtype
     verts_np = toNP(verts)
     faces_np = toNP(faces)
-    is_cloud = faces.numel() == 0
+    is_cloud = faces is None or faces.numel() == 0
 
     if(np.isnan(verts_np).any()):
         raise RuntimeError("tried to construct operators from NaN verts")
