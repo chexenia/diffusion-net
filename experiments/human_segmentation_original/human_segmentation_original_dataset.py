@@ -3,7 +3,7 @@ import os
 import sys
 import random
 import numpy as np
-
+import glob
 import torch
 from torch.utils.data import Dataset
 
@@ -147,3 +147,63 @@ class HumanSegOrigDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.verts_list[idx], self.faces_list[idx], self.frames_list[idx], self.massvec_list[idx], self.L_list[idx], self.evals_list[idx], self.evecs_list[idx], self.gradX_list[idx], self.gradY_list[idx], self.labels_list[idx]
+
+
+
+class ShapifyDataset(Dataset):
+    """Human segmentation dataset Shapify data"""
+
+    def __init__(self, root_dir, train, k_eig=128):
+
+        self.train = train  # bool
+        self.k_eig = k_eig 
+        self.root_dir = root_dir
+        self.cache_dir = os.path.join(root_dir, "cache")
+        self.op_cache_dir = None
+        self.n_class = 8
+
+        # store in memory
+        self.verts_list = []
+        self.faces_list = []
+        self.labels_list = []  # per-face labels!!
+
+        # Load the meshes & labels
+
+        # Get all the files
+        label_files = []
+
+        # Train test split
+        self.mesh_files = glob.glob(self.root_dir + "/**/*.ply", recursive=True)
+
+        print("loading {} meshes".format(len(self.mesh_files)))
+
+        # Load the actual files
+        for f in self.mesh_files:
+
+            print("loading mesh " + f)
+
+            verts, faces = pp3d.read_mesh(f)
+            #labels = np.loadtxt(label_files[iFile]).astype(int)-1
+            labels = None
+            # to torch
+            verts = torch.tensor(np.ascontiguousarray(verts)).float()
+            faces = torch.tensor(np.ascontiguousarray(faces))
+            #labels = torch.tensor(np.ascontiguousarray(labels))
+
+            # center and unit scale
+            verts = diffusion_net.geometry.normalize_positions(verts)
+
+            self.verts_list.append(verts)
+            self.faces_list.append(faces)
+            self.labels_list.append(labels)
+
+
+        # Precompute operators
+        self.frames_list, self.massvec_list, self.L_list, self.evals_list, self.evecs_list, self.gradX_list, self.gradY_list = diffusion_net.geometry.get_all_operators(self.verts_list, self.faces_list, k_eig=self.k_eig, op_cache_dir=self.op_cache_dir)
+
+
+    def __len__(self):
+        return len(self.verts_list)
+
+    def __getitem__(self, idx):
+        return self.verts_list[idx], self.faces_list[idx], self.frames_list[idx], self.massvec_list[idx], self.L_list[idx], self.evals_list[idx], self.evecs_list[idx], self.gradX_list[idx], self.gradY_list[idx], self.labels_list[idx], self.mesh_files[idx]
