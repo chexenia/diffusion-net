@@ -1,3 +1,18 @@
+**DiffusionNet CUDA**
+
+CUDA implementation of certain modules in DiffusionNet (primarily aimed at pre-processing)
+
+**Setup**
+- Setup DiffusionNet as you would normally do (see below)
+- Run *python setup.py install*
+- Enjoy speedup
+
+=========================================================================
+
+**Original readme of DiffusionNet below:**
+
+=========================================================================
+
 **DiffusionNet** is a general-purpose method for deep learning on surfaces such as 3D triangle meshes and point clouds. It is well-suited for tasks like segmentation, classification, feature extraction, etc.
 
 Why try DiffusionNet?
