@@ -22,7 +22,7 @@ import re
 
 from reco2.extensions.SPFN.spfn import fitter_factory
 
-def create_unit_data_from_hdf5(f, n_max_instances=256, noisy=True, fixed_order=False, check_only=False, shuffle=True, parse_only=False):
+def create_unit_data_from_hdf5(f, n_max_instances=256, noisy=True, shuffle=True):
     ''' 
         f will be a h5py group-like object
     '''
@@ -64,9 +64,6 @@ def create_unit_data_from_hdf5(f, n_max_instances=256, noisy=True, fixed_order=F
             return None
         instances.append(primitive)
 
-    if parse_only:
-        return P, instances
-
     if n_max_instances != -1 and n_instances > n_max_instances:
         print('n_instances {} > n_max_instances {}'.format(n_instances, n_max_instances))
         return None
@@ -74,9 +71,6 @@ def create_unit_data_from_hdf5(f, n_max_instances=256, noisy=True, fixed_order=F
     if np.amax(I_gt) >= n_instances:
         print('max label {} > n_instances {}'.format(np.amax(I_gt), n_instances))
         return None
-
-    if check_only:
-        return True
 
     T_gt = [fitter_factory.primitive_name_to_id(primitive.get_primitive_name()) for primitive in instances]
     if n_max_instances != -1:
@@ -112,92 +106,66 @@ def create_unit_data_from_hdf5(f, n_max_instances=256, noisy=True, fixed_order=F
 
     return result, parts
 
+def preprocess_data(fpath, k_eig=128, noisy=True, shuffle=True):
+    print(fpath)
+    with h5py.File(fpath, 'r') as handle:
+        data, _ = create_unit_data_from_hdf5(handle, n_max_instances=256, noisy=noisy, shuffle=shuffle)
+        handle.close()
+    verts = data['P']
+    #seg_labels = data['I_gt']
+    type_per_segment = data['T_gt']
+    segm_per_point = data['I_gt']
+    type_per_point = [type_per_segment[s] for s in segm_per_point]
+
+    labels = type_per_point
+    normals = data['normal_gt']
+
+    # to torch
+    faces = None #spfn data is point cloud
+    verts = torch.tensor(np.ascontiguousarray(verts)).float()
+    labels = torch.tensor(np.ascontiguousarray(labels))
+    normals = torch.tensor(np.ascontiguousarray(normals)).float()
+
+    # center and unit scale
+    verts = diffusion_net.geometry.normalize_positions(verts)
+
+    # Precompute operators
+    frames, massvec, L, evals, evecs, gradX, gradY = diffusion_net.geometry.get_operators(verts, faces, k_eig, None, normals)
+
+    return verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals
+
 class SPFNDataset(Dataset):
-    def __init__(self, root_dir, split_path, n_max_instances, noisy, first_n=-1, fixed_order=False, k_eig=128, use_cache=True, op_cache_dir=None):
+    def __init__(self, root_dir, split_path, n_max_instances, noisy, k_eig=128, input_features="xyz", use_cache=True):
         self.n_max_instances = n_max_instances
-        self.fixed_order = fixed_order
-        self.first_n = first_n
         self.noisy = noisy
         self.root_dir = root_dir
         self.split_path = split_path
-
         with open(split_path, "r") as f:
             self.hdf5_file_list = f.read().splitlines()
             f.close()
+        
+        self.hdf5_file_list = [f for f in self.hdf5_file_list if (self.root_dir / f).exists()]
 
-        if not fixed_order:
-            random.shuffle(self.hdf5_file_list)
-        if first_n != -1:
-            self.hdf5_file_list = self.hdf5_file_list[:first_n]
-
+        self.use_cache = use_cache
+        self.input_features = input_features
         self.k_eig = k_eig 
-        self.cache_dir = root_dir / "cache"
-        self.op_cache_dir = op_cache_dir
+        self.cache_dir = root_dir / f"cache.diffnet.keig{k_eig}"
+        self.shuffle = True #shuffle points in original point cloud
 
-        # store in memory
-        self.verts_list = []
-        self.faces_list = []
-        self.labels_list = []
-        self.normals_list = []
-
-        # check the cache
-        if use_cache:
-            load_cache = self.cache_dir / self.split_path.name
-            if load_cache.exists():
-                print("using dataset cache path: " + str(load_cache))
-                if load_cache:
-                    print("  --> loading dataset from cache")
-                    self.verts_list, self.faces_list, self.frames_list, self.massvec_list, self.L_list, self.evals_list, self.evecs_list, self.gradX_list, self.gradY_list, self.labels_list, self.normals_list, self.hdf5_file_list = torch.load( load_cache)
-                    return
-                print("  --> dataset not in cache, repopulating")
-
-        for idx, iFile in enumerate(self.hdf5_file_list):
-            print(f"loading {iFile}")
-            data, parts = self.fetch_data_at_index(idx)
-
-            verts = data['P']
-            #seg_labels = data['I_gt']
-            type_per_segment = data['T_gt']
-            segm_per_point = data['I_gt']
-            type_per_point = [type_per_segment[s] for s in segm_per_point]
-
-            labels = type_per_point
-            normals = data['normal_gt']
-
-            # to torch
-            verts = torch.tensor(np.ascontiguousarray(verts)).float()
-            labels = torch.tensor(np.ascontiguousarray(labels))
-            normals = torch.tensor(np.ascontiguousarray(normals)).float()
-
-            # center and unit scale
-            verts = diffusion_net.geometry.normalize_positions(verts)
-
-            self.verts_list.append(verts)
-            self.labels_list.append(labels)
-            self.normals_list.append(normals)
-            self.faces_list.append(None)
-
-        # Precompute operators
-        self.frames_list, self.massvec_list, self.L_list, self.evals_list, self.evecs_list, self.gradX_list, self.gradY_list = diffusion_net.geometry.get_all_operators(self.verts_list, self.faces_list, k_eig=self.k_eig, op_cache_dir=self.op_cache_dir, normals=self.normals_list)
-
-        # save to cache
-        if use_cache:
-            diffusion_net.utils.ensure_dir_exists(self.cache_dir)
-            torch.save((self.verts_list, self.faces_list, self.frames_list, self.massvec_list, self.L_list, self.evals_list, self.evecs_list, self.gradX_list, self.gradY_list, self.labels_list, self.normals_list, self.hdf5_file_list), load_cache)
-
-
-    def fetch_data_at_index(self, i):
-        fn = self.root_dir / self.hdf5_file_list[i]
-        with h5py.File(fn, 'r') as handle:
-            #print('loading from', path)
-            data = create_unit_data_from_hdf5(handle, self.n_max_instances, noisy=self.noisy, fixed_order=self.fixed_order, shuffle=not self.fixed_order)
-            assert data is not None # assume data are all clean
-
-        return data
-
-    
     def __len__(self):
-        return len(self.verts_list)
+        return len(self.hdf5_file_list)
+
+    def get_file_path(self, i):
+        return self.root_dir / self.hdf5_file_list[i]
 
     def __getitem__(self, idx):
-        return self.verts_list[idx], self.faces_list[idx], self.frames_list[idx], self.massvec_list[idx], self.L_list[idx], self.evals_list[idx], self.evecs_list[idx], self.gradX_list[idx], self.gradY_list[idx], self.labels_list[idx], self.normals_list[idx], self.hdf5_file_list[idx]
+        cached_data_path = (self.cache_dir / f"{self.hdf5_file_list[idx]}").with_suffix(".pt")
+        print("chached",cached_data_path)
+        if self.use_cache and cached_data_path.exists():
+            verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals = torch.load(cached_data_path)
+        else:
+            verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals = preprocess_data(self.root_dir / self.hdf5_file_list[idx], self.k_eig, self.noisy, self.shuffle)
+            if self.use_cache:
+                cached_data_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals, cached_data_path)
+        return verts, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals
