@@ -6,16 +6,12 @@ import scipy.sparse.linalg as sla
 # (observed on Ubuntu 20.04 w/ torch 1.6.0 and scipy 1.5.2 installed via conda)
 
 import os.path
-import sys
-import random
 from multiprocessing import Pool
 
 import numpy as np
 import scipy.spatial
 import torch
-from torch.distributions.categorical import Categorical
 import sklearn.neighbors
-
 import robust_laplacian
 import potpourri3d as pp3d
 
@@ -347,9 +343,13 @@ def compute_operators(verts, faces, k_eig, normals=None):
 
     Note: for a generalized eigenvalue problem, the mass matrix matters! The eigenvectors are only othrthonormal with respect to the mass matrix, like v^H M v, so the mass (given as the diagonal vector massvec) needs to be used in projections, etc.
     """
-
+    start = time.time()
     device = verts.device
     dtype = verts.dtype
+
+    if torch.isnan(verts).any():
+        raise RuntimeError("tried to construct operators from NaN verts")
+
     V = verts.shape[0]
     is_cloud = faces is None or faces.numel() == 0
 
@@ -455,10 +455,12 @@ def compute_operators(verts, faces, k_eig, normals=None):
     evals = torch.from_numpy(evals_np).to(device=device, dtype=dtype)
     evecs = torch.from_numpy(evecs_np).to(device=device, dtype=dtype)
 
+    print(f"compute_operators() in {time.time() - start}")
+
     return frames, massvec, L, evals, evecs, gradX, gradY
 
 
-def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=None):
+def get_all_operators(verts_list, faces_list, k_eig, normals=None):
     N = len(verts_list)
 
     frames = [None] * N
@@ -469,183 +471,11 @@ def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=
     gradX = [None] * N
     gradY = [None] * N
 
-    inds = [i for i in range(N)]
-    # process in random order
-    # random.shuffle(inds)
-
-    for num, i in enumerate(inds):
-        start = time.time()
-        print(
-            f"get_all_operators() processing {num} / {N} {num / N * 100:.3f}% in {time.time() - start}"
-        )
-        if normals is None:
-            outputs = get_operators(verts_list[i], faces_list[i], k_eig, op_cache_dir)
-        else:
-            outputs = get_operators(
-                verts_list[i], faces_list[i], k_eig, op_cache_dir, normals=normals[i]
-            )
-        frames[i] = outputs[0]
-        massvec[i] = outputs[1]
-        L[i] = outputs[2]
-        evals[i] = outputs[3]
-        evecs[i] = outputs[4]
-        gradX[i] = outputs[5]
-        gradY[i] = outputs[6]
+    for i in range(N):
+        outputs = compute_operators(verts_list[i], faces_list[i], k_eig, normals[i])
+        frames[i], massvec[i], L[i], evals[i], evecs[i], gradX[i], gradY[i] = outputs
 
     return frames, massvec, L, evals, evecs, gradX, gradY
-
-
-def get_operators(
-    verts, faces, k_eig=128, op_cache_dir=None, normals=None, overwrite_cache=False
-):
-    """
-    See documentation for compute_operators(). This essentailly just wraps a call to compute_operators, using a cache if possible.
-    All arrays are always computed using double precision for stability, then truncated to single precision floats to store on disk, and finally returned as a tensor with dtype/device matching the `verts` input.
-    """
-
-    device = verts.device
-    dtype = verts.dtype
-    verts_np = toNP(verts)
-    faces_np = toNP(faces)
-    is_cloud = faces is None or faces.numel() == 0
-
-    if np.isnan(verts_np).any():
-        raise RuntimeError("tried to construct operators from NaN verts")
-
-    # Check the cache directory
-    # Note 1: Collisions here are exceptionally unlikely, so we could probably just use the hash...
-    #         but for good measure we check values nonetheless.
-    # Note 2: There is a small possibility for race conditions to lead to bucket gaps or duplicate
-    #         entries in this cache. The good news is that that is totally fine, and at most slightly
-    #         slows performance with rare extra cache misses.
-    found = False
-    if op_cache_dir is not None:
-        utils.ensure_dir_exists(op_cache_dir)
-        hash_key_str = str(utils.hash_arrays((verts_np, faces_np)))
-        # print("Building operators for input with hash: " + hash_key_str)
-
-        # Search through buckets with matching hashes.  When the loop exits, this
-        # is the bucket index of the file we should write to.
-        i_cache_search = 0
-        while True:
-
-            # Form the name of the file to check
-            search_path = os.path.join(
-                op_cache_dir, hash_key_str + "_" + str(i_cache_search) + ".npz"
-            )
-
-            try:
-                # print('loading path: ' + str(search_path))
-                npzfile = np.load(search_path, allow_pickle=True)
-                cache_verts = npzfile["verts"]
-                cache_faces = npzfile["faces"]
-                cache_k_eig = npzfile["k_eig"].item()
-
-                # If the cache doesn't match, keep looking
-                if (not np.array_equal(verts, cache_verts)) or (
-                    not np.array_equal(faces, cache_faces)
-                ):
-                    i_cache_search += 1
-                    print("hash collision! searching next.")
-                    continue
-
-                # print("  cache hit!")
-
-                # If we're overwriting, or there aren't enough eigenvalues, just delete it; we'll create a new
-                # entry below more eigenvalues
-                if overwrite_cache:
-                    print("  overwriting cache by request")
-                    os.remove(search_path)
-                    break
-
-                if cache_k_eig < k_eig:
-                    print("  overwriting cache --- not enough eigenvalues")
-                    os.remove(search_path)
-                    break
-
-                if "L_data" not in npzfile:
-                    print("  overwriting cache --- entries are absent")
-                    os.remove(search_path)
-                    break
-
-                def read_sp_mat(prefix):
-                    data = npzfile[prefix + "_data"]
-                    indices = npzfile[prefix + "_indices"]
-                    indptr = npzfile[prefix + "_indptr"]
-                    shape = npzfile[prefix + "_shape"]
-                    mat = scipy.sparse.csc_matrix((data, indices, indptr), shape=shape)
-                    return mat
-
-                # This entry matches! Return it.
-                frames = npzfile["frames"]
-                mass = npzfile["mass"]
-                L = read_sp_mat("L")
-                evals = npzfile["evals"][:k_eig]
-                evecs = npzfile["evecs"][:, :k_eig]
-                gradX = read_sp_mat("gradX")
-                gradY = read_sp_mat("gradY")
-
-                frames = torch.from_numpy(frames).to(device=device, dtype=dtype)
-                mass = torch.from_numpy(mass).to(device=device, dtype=dtype)
-                L = utils.sparse_np_to_torch(L).to(device=device, dtype=dtype)
-                evals = torch.from_numpy(evals).to(device=device, dtype=dtype)
-                evecs = torch.from_numpy(evecs).to(device=device, dtype=dtype)
-                gradX = utils.sparse_np_to_torch(gradX).to(device=device, dtype=dtype)
-                gradY = utils.sparse_np_to_torch(gradY).to(device=device, dtype=dtype)
-
-                found = True
-
-                break
-
-            except FileNotFoundError:
-                print("  cache miss -- constructing operators")
-                break
-
-            except Exception as E:
-                print("unexpected error loading file: " + str(E))
-                print("-- constructing operators")
-                break
-
-    if not found:
-
-        # No matching entry found; recompute.
-        frames, mass, L, evals, evecs, gradX, gradY = compute_operators(
-            verts, faces, k_eig, normals=normals
-        )
-
-        dtype_np = np.float32
-
-        # Store it in the cache
-        if op_cache_dir is not None:
-
-            L_np = utils.sparse_torch_to_np(L).astype(dtype_np)
-            gradX_np = utils.sparse_torch_to_np(gradX).astype(dtype_np)
-            gradY_np = utils.sparse_torch_to_np(gradY).astype(dtype_np)
-
-            np.savez(
-                search_path,
-                verts=verts_np.astype(dtype_np),
-                frames=toNP(frames).astype(dtype_np),
-                faces=faces_np,
-                k_eig=k_eig,
-                mass=toNP(mass).astype(dtype_np),
-                L_data=L_np.data.astype(dtype_np),
-                L_indices=L_np.indices,
-                L_indptr=L_np.indptr,
-                L_shape=L_np.shape,
-                evals=toNP(evals).astype(dtype_np),
-                evecs=toNP(evecs).astype(dtype_np),
-                gradX_data=gradX_np.data.astype(dtype_np),
-                gradX_indices=gradX_np.indices,
-                gradX_indptr=gradX_np.indptr,
-                gradX_shape=gradX_np.shape,
-                gradY_data=gradY_np.data.astype(dtype_np),
-                gradY_indices=gradY_np.indices,
-                gradY_indptr=gradY_np.indptr,
-                gradY_shape=gradY_np.shape,
-            )
-
-    return frames, mass, L, evals, evecs, gradX, gradY
 
 
 def to_basis(values, basis, massvec):

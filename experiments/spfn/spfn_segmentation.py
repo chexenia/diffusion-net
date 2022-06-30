@@ -1,6 +1,5 @@
 import copy
 from functools import partial
-import glob
 from multiprocessing import Pool
 import os
 import sys
@@ -20,20 +19,7 @@ sys.path.append(
 )  # add the path to the DiffusionNet src
 import diffusion_net
 from spfn_dataset import SPFNDataset, preprocess_data
-
-from reco2.extensions.SPFN.spfn.fitter_factory import (
-    register_primitives,
-    SPFN_DEFAULT_PRIMITIVES,
-)
-
-register_primitives(SPFN_DEFAULT_PRIMITIVES)
-
-
-# === Options
-base_path = os.path.dirname(__file__)
-
-# Parse a few args
-
+from reco2.scan2cad.utils.feature_set import Features
 
 def train_epoch(epoch):
     train_loader = split_loaders["train"]
@@ -53,7 +39,7 @@ def train_epoch(epoch):
     for data in tqdm(train_loader):
 
         # Get data
-        verts, frames, mass, L, evals, evecs, gradX, gradY, labels, normals = data
+        verts, frames, mass, L, evals, evecs, gradX, gradY, labels, normals, features, indices = data
         faces = None
         # Move to device
         verts = verts.to(device)
@@ -67,17 +53,8 @@ def train_epoch(epoch):
         gradX = gradX.to(device)
         gradY = gradY.to(device)
         labels = labels.to(device)
+        features = features.to(device)
         # normals = normals.to(device)
-
-        # Randomly rotate positions
-        if augment_random_rotate:
-            verts = diffusion_net.utils.random_rotate_points(verts)
-
-        # Construct features
-        if input_features == "xyz":
-            features = verts
-        elif input_features == "hks":
-            features = diffusion_net.geometry.compute_hks_autoscale(evals, evecs, 16)
 
         # Apply the model
         preds = model(
@@ -135,10 +112,11 @@ def evaluate(split, save_pred=True, view_debug=True):
                 gradY,
                 gt_labels,
                 normals,
+                features,
                 indices,
             ) = data
+
             faces = None
-            # mpath = split_datasets['test'].get
             # Move to device
             verts = verts.to(device)
             if faces is not None:
@@ -151,14 +129,7 @@ def evaluate(split, save_pred=True, view_debug=True):
             gradX = gradX.to(device)
             gradY = gradY.to(device)
             gt_labels = gt_labels.to(device)
-
-            # Construct features
-            if input_features == "xyz":
-                features = verts
-            elif input_features == "hks":
-                features = diffusion_net.geometry.compute_hks_autoscale(
-                    evals, evecs, 16
-                )
+            features = features.to(device)
 
             # Apply the model
             preds = model(
@@ -285,7 +256,7 @@ def prep_one(cache_dir, dataset_path, fn):
         gradY,
         labels,
         normals,
-    ) = preprocess_data(fpath, k_eig, noisy, shuffle)
+    ) = preprocess_data(fpath, k_eig, shuffle)
 
     torch.save(
         (verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals),
@@ -295,8 +266,7 @@ def prep_one(cache_dir, dataset_path, fn):
 
 def prep(args):
     """ "precalculate and store the operators for each model and store in disk cache"""
-    cache_dir = args.dataset_path / cache_name
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path.mkdir(parents=True, exist_ok=True)
 
     for split in splits:
         split_path = args.split_path / "{}.txt".format(split)
@@ -313,7 +283,7 @@ def prep(args):
         # pool.map(per_one_prep, hdf5_file_list)
 
         for fn in hdf5_file_list:
-            prep_one(cache_dir, args.dataset_path, fn)
+            prep_one(cache_path, args.dataset_path, fn)
 
         print("Time elapsed: ", time.time() - start)
 
@@ -321,12 +291,6 @@ def prep(args):
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["train", "test", "eval", "prep"])
-    parser.add_argument(
-        "--input_features",
-        type=str,
-        help="what features to use as input ('xyz' or 'hks') default: hks",
-        default="xyz",
-    )
     parser.add_argument(
         "--split_path", type=Path, required=True, help="path to the split files"
     )
@@ -357,7 +321,7 @@ if __name__ == "__main__":
     n_class = 4
 
     # model
-    input_features = args.input_features
+    in_features = Features.XYZ
     k_eig = 128
     n_block = 4
 
@@ -367,17 +331,16 @@ if __name__ == "__main__":
     decay_every = 50
     decay_rate = 0.5
     num_workers = 0
-    batch_size = 16
-    augment_random_rotate = input_features == "xyz"
+    batch_size = 4
     n_max_instances = 256  # max number of segments for a model
     dataset_name = "spfn"
     output_as = "vertices"
-    noisy = True
     shuffle = True
     dataset_path = args.dataset_path
-    model_name = f"diffnet.{dataset_name}.seg.{input_features}_{n_block}x{k_eig}"
+    model_name = f"diffnet.{dataset_name}.seg.{in_features}_{n_block}x{k_eig}"
     cache_name = f"cache.diffnet.keig{k_eig}"
     save_path = args.save_path / model_name
+    cache_path = args.save_path / cache_name
 
     dirs = ["models", "results", "logs"]
     for d in dirs:
@@ -403,10 +366,8 @@ if __name__ == "__main__":
             split_datasets[split] = SPFNDataset(
                 dataset_path,
                 split_path,
-                n_max_instances=256,
-                noisy=True,
+                in_features=in_features,
                 k_eig=k_eig,
-                input_features=input_features,
                 use_cache=True,
             )
             num_samples = len(split_datasets[split])
@@ -424,10 +385,8 @@ if __name__ == "__main__":
 
         # === Create the model
 
-        C_in = {"xyz": 3, "hks": 16}[input_features]  # dimension of input features
-
         model = diffusion_net.layers.DiffusionNet(
-            C_in=C_in,
+            C_in=in_features.num_channels,
             C_out=n_class,
             C_width=k_eig,
             N_block=n_block,
