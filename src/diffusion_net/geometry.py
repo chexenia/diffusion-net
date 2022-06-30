@@ -1,6 +1,7 @@
 import time
 import scipy
 import scipy.sparse.linalg as sla
+
 # ^^^ we NEED to import scipy before torch, or it crashes :(
 # (observed on Ubuntu 20.04 w/ torch 1.6.0 and scipy 1.5.2 installed via conda)
 
@@ -23,6 +24,7 @@ from .utils import toNP
 
 import diffusion_net_cuda as dnc
 
+
 def norm(x, highdim=False):
     """
     Computes norm of an array of vectors. Given (shape,d), returns (shape) after norm along last dimension
@@ -41,12 +43,18 @@ def normalize(x, divide_eps=1e-6, highdim=False):
     """
     Computes norm^2 of an array of vectors. Given (shape,d), returns (shape) after norm along last dimension
     """
-    if(len(x.shape) == 1):
-        raise ValueError("called normalize() on single vector of dim " +
-                         str(x.shape) + " are you sure?")
-    if(not highdim and x.shape[-1] > 4):
-        raise ValueError("called normalize() with large last dimension " +
-                         str(x.shape) + " are you sure?")
+    if len(x.shape) == 1:
+        raise ValueError(
+            "called normalize() on single vector of dim "
+            + str(x.shape)
+            + " are you sure?"
+        )
+    if not highdim and x.shape[-1] > 4:
+        raise ValueError(
+            "called normalize() with large last dimension "
+            + str(x.shape)
+            + " are you sure?"
+        )
     return x / (norm(x, highdim=highdim) + divide_eps).unsqueeze(-1)
 
 
@@ -66,6 +74,7 @@ def dot(vec_A, vec_B):
 # Given (..., 3) vectors and normals, projects out any components of vecs
 # which lies in the direction of normals. Normals are assumed to be unit.
 
+
 def project_to_tangent(vecs, unit_normals):
     dots = dot(vecs, unit_normals)
     return vecs - unit_normals * dots.unsqueeze(-1)
@@ -79,6 +88,7 @@ def face_area(verts, faces):
     raw_normal = cross(vec_A, vec_B)
     return 0.5 * norm(raw_normal)
 
+
 def face_normals(verts, faces, normalized=True):
     coords = face_coords(verts, faces)
     vec_A = coords[:, 1, :] - coords[:, 0, :]
@@ -91,24 +101,30 @@ def face_normals(verts, faces, normalized=True):
 
     return raw_normal
 
+
 def neighborhood_normal(points):
     # points: (N, K, 3) array of neighborhood psoitions
     # points should be centered at origin
     # out: (N,3) array of normals
     # numpy in, numpy out
     (u, s, vh) = np.linalg.svd(points, full_matrices=False)
-    normal = vh[:,2,:]
-    return normal / np.linalg.norm(normal,axis=-1, keepdims=True)
+    normal = vh[:, 2, :]
+    return normal / np.linalg.norm(normal, axis=-1, keepdims=True)
+
 
 def mesh_vertex_normals(verts, faces):
     # numpy in / out
-    face_n = toNP(face_normals(torch.tensor(verts), torch.tensor(faces))) # ugly torch <---> numpy
+    face_n = toNP(
+        face_normals(torch.tensor(verts), torch.tensor(faces))
+    )  # ugly torch <---> numpy
 
     vertex_normals = np.zeros(verts.shape)
     for i in range(3):
-        np.add.at(vertex_normals, faces[:,i], face_n)
+        np.add.at(vertex_normals, faces[:, i], face_n)
 
-    vertex_normals = vertex_normals / np.linalg.norm(vertex_normals,axis=-1,keepdims=True)
+    vertex_normals = vertex_normals / np.linalg.norm(
+        vertex_normals, axis=-1, keepdims=True
+    )
 
     return vertex_normals
 
@@ -116,14 +132,16 @@ def mesh_vertex_normals(verts, faces):
 def vertex_normals(verts, faces, n_neighbors_cloud=30):
     verts_np = toNP(verts)
 
-    if faces is None or faces.numel() == 0: # point cloud
-    
-        _, neigh_inds = find_knn(verts, verts, n_neighbors_cloud, omit_diagonal=True, method='cpu_kd')
-        neigh_points = verts_np[neigh_inds,:]
-        neigh_points = neigh_points - verts_np[:,np.newaxis,:]
+    if faces is None or faces.numel() == 0:  # point cloud
+
+        _, neigh_inds = find_knn(
+            verts, verts, n_neighbors_cloud, omit_diagonal=True, method="cpu_kd"
+        )
+        neigh_points = verts_np[neigh_inds, :]
+        neigh_points = neigh_points - verts_np[:, np.newaxis, :]
         normals = neighborhood_normal(neigh_points)
 
-    else: # mesh
+    else:  # mesh
 
         normals = mesh_vertex_normals(verts_np, toNP(faces))
 
@@ -132,20 +150,22 @@ def vertex_normals(verts, faces, n_neighbors_cloud=30):
         if bad_normals_mask.any():
             bbox = np.amax(verts_np, axis=0) - np.amin(verts_np, axis=0)
             scale = np.linalg.norm(bbox) * 1e-4
-            wiggle = (np.random.RandomState(seed=777).rand(*verts.shape)-0.5) * scale
+            wiggle = (np.random.RandomState(seed=777).rand(*verts.shape) - 0.5) * scale
             wiggle_verts = verts_np + bad_normals_mask * wiggle
             normals = mesh_vertex_normals(wiggle_verts, toNP(faces))
 
         # if still NaN assign random normals (probably means unreferenced verts in mesh)
         bad_normals_mask = np.isnan(normals).any(axis=1)
         if bad_normals_mask.any():
-            normals[bad_normals_mask,:] = (np.random.RandomState(seed=777).rand(*verts.shape)-0.5)[bad_normals_mask,:]
-            normals = normals / np.linalg.norm(normals, axis=-1)[:,np.newaxis]
-            
+            normals[bad_normals_mask, :] = (
+                np.random.RandomState(seed=777).rand(*verts.shape) - 0.5
+            )[bad_normals_mask, :]
+            normals = normals / np.linalg.norm(normals, axis=-1)[:, np.newaxis]
 
     normals = torch.from_numpy(normals).to(device=verts.device, dtype=verts.dtype)
-        
-    if torch.any(torch.isnan(normals)): raise ValueError("NaN normals :(")
+
+    if torch.any(torch.isnan(normals)):
+        raise ValueError("NaN normals :(")
 
     return normals
 
@@ -160,25 +180,29 @@ def build_tangent_frames(verts, faces, normals=None):
         vert_normals = vertex_normals(verts, faces)  # (V,3)
     else:
         assert normals.shape[0] == V
-        vert_normals = normals 
+        vert_normals = normals
 
     # = find an orthogonal basis
 
     basis_cand1 = torch.tensor([1, 0, 0]).to(device=device, dtype=dtype).expand(V, -1)
     basis_cand2 = torch.tensor([0, 1, 0]).to(device=device, dtype=dtype).expand(V, -1)
-    
-    basisX = torch.where((torch.abs(dot(vert_normals, basis_cand1))
-                          < 0.9).unsqueeze(-1), basis_cand1, basis_cand2)
+
+    basisX = torch.where(
+        (torch.abs(dot(vert_normals, basis_cand1)) < 0.9).unsqueeze(-1),
+        basis_cand1,
+        basis_cand2,
+    )
     basisX = project_to_tangent(basisX, vert_normals)
     basisX = normalize(basisX)
     basisY = cross(vert_normals, basisX)
     frames = torch.stack((basisX, basisY, vert_normals), dim=-2)
-    
+
     if torch.any(torch.isnan(frames)):
         raise ValueError("NaN coordinate frame! Must be very degenerate")
 
     return frames
-        
+
+
 def edge_tangent_vectors(verts, frames, edges):
     edge_vecs = verts[edges[1, :], :] - verts[edges[0, :], :]
     basisX = frames[edges[0, :], 0, :]
@@ -190,18 +214,21 @@ def edge_tangent_vectors(verts, frames, edges):
 
     return edge_tangent
 
+
 def build_grad_cuda(verts, edges, edge_tangent_vecs, n_neighbors_cloud=30):
     # Optionally to have this on GPU earlier
-    edge_tangent_vecs_cuda = edge_tangent_vecs.to('cuda:0')
-    edges_tensor_cuda = torch.tensor(edges, dtype=torch.int32, device='cuda:0')
-    verts_cuda = verts.to('cuda:0')
+    edge_tangent_vecs_cuda = edge_tangent_vecs.to("cuda:0")
+    edges_tensor_cuda = torch.tensor(edges, dtype=torch.int32, device="cuda:0")
+    verts_cuda = verts.to("cuda:0")
     return_device = verts.device
 
     # Grad_data currently gives additional debug information. Will be removed later.
-    grad_data = dnc.build_grad(verts_cuda, edges_tensor_cuda, edge_tangent_vecs_cuda, n_neighbors_cloud)
+    grad_data = dnc.build_grad(
+        verts_cuda, edges_tensor_cuda, edge_tangent_vecs_cuda, n_neighbors_cloud
+    )
 
     # only supporting full neighbourhoods now (all vertices must have n_neighbors_cloud neighbours)
-    assert(torch.max(grad_data[4]) == torch.min(grad_data[4]))
+    assert torch.max(grad_data[4]) == torch.min(grad_data[4])
 
     if grad_data[0].device != return_device:
         rows = grad_data[0].to(return_device).type(torch.LongTensor)
@@ -214,22 +241,27 @@ def build_grad_cuda(verts, edges, edge_tangent_vecs, n_neighbors_cloud=30):
         data_gradX = grad_data[2]
         data_gradY = grad_data[3]
 
-    indices = torch.vstack((rows,cols))
-    shape = torch.Size([len(verts_cuda),len(verts_cuda)])
+    indices = torch.vstack((rows, cols))
+    shape = torch.Size([len(verts_cuda), len(verts_cuda)])
 
-    gradX = torch.sparse.FloatTensor(indices, torch.FloatTensor(data_gradX), torch.Size(shape)).coalesce()
-    gradY = torch.sparse.FloatTensor(indices, torch.FloatTensor(data_gradY), torch.Size(shape)).coalesce()
+    gradX = torch.sparse.FloatTensor(
+        indices, torch.FloatTensor(data_gradX), torch.Size(shape)
+    ).coalesce()
+    gradY = torch.sparse.FloatTensor(
+        indices, torch.FloatTensor(data_gradY), torch.Size(shape)
+    ).coalesce()
 
     return gradX, gradY
+
 
 def build_grad(verts, edges, edge_tangent_vectors):
     """
     Build a (V, V) complex sparse matrix grad operator. Given real inputs at vertices, produces a complex (vector value) at vertices giving the gradient. All values pointwise.
     - edges: (2, E)
     """
-    
+
     edges_np = toNP(edges)
-    #edge_tangent_vectors_np = toNP(edge_tangent_vectors)
+    # edge_tangent_vectors_np = toNP(edge_tangent_vectors)
 
     # TODO find a way to do this in pure numpy?
 
@@ -257,9 +289,9 @@ def build_grad(verts, edges, edge_tangent_vectors):
             iE = vert_edge_outgoing[iV][i_neigh]
             jV = edges_np[1, iE]
             ind_lookup.append(jV)
-    
+
             edge_vec = edge_tangent_vectors[iE][:]
-            w_e = 1.
+            w_e = 1.0
 
             lhs_mat[i_neigh][:] = w_e * edge_vec
             rhs_mat[i_neigh][0] = w_e * (-1)
@@ -283,10 +315,11 @@ def build_grad(verts, edges, edge_tangent_vectors):
     col_inds = np.array(col_inds)
     data_vals = np.array(data_vals)
     grad_mat = scipy.sparse.coo_matrix(
-        (data_vals, (row_inds, col_inds)), shape=(
-            N, N)).tocsc()
+        (data_vals, (row_inds, col_inds)), shape=(N, N)
+    ).tocsc()
 
     return np.real(grad_mat), np.imag(grad_mat)
+
 
 def compute_operators(verts, faces, k_eig, normals=None):
     """
@@ -306,7 +339,7 @@ def compute_operators(verts, faces, k_eig, normals=None):
       - massvec: (V) real diagonal of lumped mass matrix
       - L: (VxV) real sparse matrix of (weak) Laplacian
       - evals: (k) list of eigenvalues of the Laplacian
-      - evecs: (V,k) list of eigenvectors of the Laplacian 
+      - evecs: (V,k) list of eigenvectors of the Laplacian
       - gradX: (VxV) sparse matrix which gives X-component of gradient in the local basis at the vertex
       - gradY: same as gradX but for Y-component of gradient
 
@@ -337,10 +370,10 @@ def compute_operators(verts, faces, k_eig, normals=None):
         L = pp3d.cotan_laplacian(verts_np, faces_np, denom_eps=1e-10)
         massvec_np = pp3d.vertex_areas(verts_np, faces_np)
         massvec_np += eps * np.mean(massvec_np)
-    
-    if(np.isnan(L.data).any()):
+
+    if np.isnan(L.data).any():
         raise RuntimeError("NaN Laplace matrix")
-    if(np.isnan(massvec_np).any()):
+    if np.isnan(massvec_np).any():
         raise RuntimeError("NaN mass matrix")
 
     # Read off neighbors & rotations from the Laplacian
@@ -352,7 +385,7 @@ def compute_operators(verts, faces, k_eig, normals=None):
     if k_eig > 0:
 
         # Prepare matrices
-        L_eigsh = (L + scipy.sparse.identity(L.shape[0])*eps).tocsc()
+        L_eigsh = (L + scipy.sparse.identity(L.shape[0]) * eps).tocsc()
         massvec_eigsh = massvec_np
         Mmat = scipy.sparse.diags(massvec_eigsh)
         eigs_sigma = eps
@@ -361,25 +394,27 @@ def compute_operators(verts, faces, k_eig, normals=None):
         while True:
             try:
                 # We would be happy here to lower tol or maxiter since we don't need these to be super precise, but for some reason those parameters seem to have no effect
-                evals_np, evecs_np = sla.eigsh(L_eigsh, k=k_eig, M=Mmat, sigma=eigs_sigma)
-            
+                evals_np, evecs_np = sla.eigsh(
+                    L_eigsh, k=k_eig, M=Mmat, sigma=eigs_sigma
+                )
+
                 # Clip off any eigenvalues that end up slightly negative due to numerical weirdness
-                evals_np = np.clip(evals_np, a_min=0., a_max=float('inf'))
+                evals_np = np.clip(evals_np, a_min=0.0, a_max=float("inf"))
 
                 break
             except Exception as e:
                 print(e)
-                if(failcount > 3):
+                if failcount > 3:
                     raise ValueError("failed to compute eigendecomp")
                 failcount += 1
                 print("--- decomp failed; adding eps ===> count: " + str(failcount))
-                L_eigsh = L_eigsh + scipy.sparse.identity(L.shape[0]) * (eps * 10**failcount)
+                L_eigsh = L_eigsh + scipy.sparse.identity(L.shape[0]) * (
+                    eps * 10**failcount
+                )
 
-
-    else: #k_eig == 0
+    else:  # k_eig == 0
         evals_np = np.zeros((0))
-        evecs_np = np.zeros((verts.shape[0],0))
-
+        evecs_np = np.zeros((verts.shape[0], 0))
 
     # == Build gradient matrices
 
@@ -387,11 +422,13 @@ def compute_operators(verts, faces, k_eig, normals=None):
     if is_cloud:
 
         verts_np = toNP(verts)
-        #frames_np = toNP(frames)
+        # frames_np = toNP(frames)
         n_neighbors_cloud = 30
-        _, neigh_inds = find_knn(verts, verts, n_neighbors_cloud, omit_diagonal=True, method='cpu_kd')
-        neigh_points = verts_np[neigh_inds,:]
-        neigh_vecs = neigh_points - verts_np[:,np.newaxis,:]
+        _, neigh_inds = find_knn(
+            verts, verts, n_neighbors_cloud, omit_diagonal=True, method="cpu_kd"
+        )
+        neigh_points = verts_np[neigh_inds, :]
+        neigh_vecs = neigh_points - verts_np[:, np.newaxis, :]
 
         # TODO this could easily be way faster. For instance we could avoid the weird edges format and the corresponding pure-python loop via some numpy broadcasting of the same logic. The way it works right now is just to share code with the mesh version. But its low priority since its preprocessing code.
 
@@ -399,12 +436,13 @@ def compute_operators(verts, faces, k_eig, normals=None):
         edges = np.stack((edge_inds_from, neigh_inds.flatten()))
         edges = torch.tensor(edges)
 
-    else: 
-        edges = torch.tensor(np.stack((inds_row, inds_col), axis=0), device=device, dtype=faces.dtype)
-      
+    else:
+        edges = torch.tensor(
+            np.stack((inds_row, inds_col), axis=0), device=device, dtype=faces.dtype
+        )
 
     edge_tangent_vecs = edge_tangent_vectors(verts, frames, edges)
-    
+
     is_cuda = True
     if is_cuda:
         gradX, gradY = build_grad_cuda(verts, edges, edge_tangent_vecs)
@@ -422,7 +460,7 @@ def compute_operators(verts, faces, k_eig, normals=None):
 
 def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=None):
     N = len(verts_list)
-            
+
     frames = [None] * N
     massvec = [None] * N
     L = [None] * N
@@ -434,14 +472,18 @@ def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=
     inds = [i for i in range(N)]
     # process in random order
     # random.shuffle(inds)
-   
+
     for num, i in enumerate(inds):
         start = time.time()
-        print(f"get_all_operators() processing {num} / {N} {num / N * 100:.3f}% in {time.time() - start}")
+        print(
+            f"get_all_operators() processing {num} / {N} {num / N * 100:.3f}% in {time.time() - start}"
+        )
         if normals is None:
             outputs = get_operators(verts_list[i], faces_list[i], k_eig, op_cache_dir)
         else:
-            outputs = get_operators(verts_list[i], faces_list[i], k_eig, op_cache_dir, normals=normals[i])
+            outputs = get_operators(
+                verts_list[i], faces_list[i], k_eig, op_cache_dir, normals=normals[i]
+            )
         frames[i] = outputs[0]
         massvec[i] = outputs[1]
         L[i] = outputs[2]
@@ -449,10 +491,13 @@ def get_all_operators(verts_list, faces_list, k_eig, op_cache_dir=None, normals=
         evecs[i] = outputs[4]
         gradX[i] = outputs[5]
         gradY[i] = outputs[6]
-        
+
     return frames, massvec, L, evals, evecs, gradX, gradY
 
-def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, overwrite_cache=False):
+
+def get_operators(
+    verts, faces, k_eig=128, op_cache_dir=None, normals=None, overwrite_cache=False
+):
     """
     See documentation for compute_operators(). This essentailly just wraps a call to compute_operators, using a cache if possible.
     All arrays are always computed using double precision for stability, then truncated to single precision floats to store on disk, and finally returned as a tensor with dtype/device matching the `verts` input.
@@ -464,7 +509,7 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
     faces_np = toNP(faces)
     is_cloud = faces is None or faces.numel() == 0
 
-    if(np.isnan(verts_np).any()):
+    if np.isnan(verts_np).any():
         raise RuntimeError("tried to construct operators from NaN verts")
 
     # Check the cache directory
@@ -486,9 +531,9 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
 
             # Form the name of the file to check
             search_path = os.path.join(
-                op_cache_dir,
-                hash_key_str + "_" + str(i_cache_search) + ".npz")
-            
+                op_cache_dir, hash_key_str + "_" + str(i_cache_search) + ".npz"
+            )
+
             try:
                 # print('loading path: ' + str(search_path))
                 npzfile = np.load(search_path, allow_pickle=True)
@@ -497,7 +542,9 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
                 cache_k_eig = npzfile["k_eig"].item()
 
                 # If the cache doesn't match, keep looking
-                if (not np.array_equal(verts, cache_verts)) or (not np.array_equal(faces, cache_faces)):
+                if (not np.array_equal(verts, cache_verts)) or (
+                    not np.array_equal(faces, cache_faces)
+                ):
                     i_cache_search += 1
                     print("hash collision! searching next.")
                     continue
@@ -506,21 +553,20 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
 
                 # If we're overwriting, or there aren't enough eigenvalues, just delete it; we'll create a new
                 # entry below more eigenvalues
-                if overwrite_cache: 
+                if overwrite_cache:
                     print("  overwriting cache by request")
                     os.remove(search_path)
                     break
-                
+
                 if cache_k_eig < k_eig:
                     print("  overwriting cache --- not enough eigenvalues")
                     os.remove(search_path)
                     break
-                
+
                 if "L_data" not in npzfile:
                     print("  overwriting cache --- entries are absent")
                     os.remove(search_path)
                     break
-
 
                 def read_sp_mat(prefix):
                     data = npzfile[prefix + "_data"]
@@ -535,7 +581,7 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
                 mass = npzfile["mass"]
                 L = read_sp_mat("L")
                 evals = npzfile["evals"][:k_eig]
-                evecs = npzfile["evecs"][:,:k_eig]
+                evecs = npzfile["evecs"][:, :k_eig]
                 gradX = read_sp_mat("gradX")
                 gradY = read_sp_mat("gradY")
 
@@ -546,15 +592,15 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
                 evecs = torch.from_numpy(evecs).to(device=device, dtype=dtype)
                 gradX = utils.sparse_np_to_torch(gradX).to(device=device, dtype=dtype)
                 gradY = utils.sparse_np_to_torch(gradY).to(device=device, dtype=dtype)
-                
+
                 found = True
-                
+
                 break
 
             except FileNotFoundError:
                 print("  cache miss -- constructing operators")
                 break
-            
+
             except Exception as E:
                 print("unexpected error loading file: " + str(E))
                 print("-- constructing operators")
@@ -563,7 +609,9 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
     if not found:
 
         # No matching entry found; recompute.
-        frames, mass, L, evals, evecs, gradX, gradY = compute_operators(verts, faces, k_eig, normals=normals)
+        frames, mass, L, evals, evecs, gradX, gradY = compute_operators(
+            verts, faces, k_eig, normals=normals
+        )
 
         dtype_np = np.float32
 
@@ -574,29 +622,31 @@ def get_operators(verts, faces, k_eig=128, op_cache_dir=None, normals=None, over
             gradX_np = utils.sparse_torch_to_np(gradX).astype(dtype_np)
             gradY_np = utils.sparse_torch_to_np(gradY).astype(dtype_np)
 
-            np.savez(search_path,
-                     verts=verts_np.astype(dtype_np),
-                     frames=toNP(frames).astype(dtype_np),
-                     faces=faces_np,
-                     k_eig=k_eig,
-                     mass=toNP(mass).astype(dtype_np),
-                     L_data = L_np.data.astype(dtype_np),
-                     L_indices = L_np.indices,
-                     L_indptr = L_np.indptr,
-                     L_shape = L_np.shape,
-                     evals=toNP(evals).astype(dtype_np),
-                     evecs=toNP(evecs).astype(dtype_np),
-                     gradX_data = gradX_np.data.astype(dtype_np),
-                     gradX_indices = gradX_np.indices,
-                     gradX_indptr = gradX_np.indptr,
-                     gradX_shape = gradX_np.shape,
-                     gradY_data = gradY_np.data.astype(dtype_np),
-                     gradY_indices = gradY_np.indices,
-                     gradY_indptr = gradY_np.indptr,
-                     gradY_shape = gradY_np.shape,
-                     )
+            np.savez(
+                search_path,
+                verts=verts_np.astype(dtype_np),
+                frames=toNP(frames).astype(dtype_np),
+                faces=faces_np,
+                k_eig=k_eig,
+                mass=toNP(mass).astype(dtype_np),
+                L_data=L_np.data.astype(dtype_np),
+                L_indices=L_np.indices,
+                L_indptr=L_np.indptr,
+                L_shape=L_np.shape,
+                evals=toNP(evals).astype(dtype_np),
+                evecs=toNP(evecs).astype(dtype_np),
+                gradX_data=gradX_np.data.astype(dtype_np),
+                gradX_indices=gradX_np.indices,
+                gradX_indptr=gradX_np.indptr,
+                gradX_shape=gradX_np.shape,
+                gradY_data=gradY_np.data.astype(dtype_np),
+                gradY_indices=gradY_np.indices,
+                gradY_indptr=gradY_np.indptr,
+                gradY_shape=gradY_np.shape,
+            )
 
     return frames, mass, L, evals, evecs, gradX, gradY
+
 
 def to_basis(values, basis, massvec):
     """
@@ -626,6 +676,7 @@ def from_basis(values, basis):
     else:
         return torch.matmul(basis, values)
 
+
 def compute_hks(evals, evecs, scales):
     """
     Inputs:
@@ -646,40 +697,46 @@ def compute_hks(evals, evecs, scales):
         expand_batch = False
 
     # TODO could be a matmul
-    power_coefs = torch.exp(-evals.unsqueeze(1) * scales.unsqueeze(-1)).unsqueeze(1) # (B,1,S,K)
+    power_coefs = torch.exp(-evals.unsqueeze(1) * scales.unsqueeze(-1)).unsqueeze(
+        1
+    )  # (B,1,S,K)
     terms = power_coefs * (evecs * evecs).unsqueeze(2)  # (B,V,S,K)
 
-    out = torch.sum(terms, dim=-1) # (B,V,S)
+    out = torch.sum(terms, dim=-1)  # (B,V,S)
 
     if expand_batch:
         return out.squeeze(0)
     else:
         return out
 
+
 def compute_hks_autoscale(evals, evecs, count):
     # these scales roughly approximate those suggested in the hks paper
-    scales = torch.logspace(-2, 0., steps=count, device=evals.device, dtype=evals.dtype)
+    scales = torch.logspace(
+        -2, 0.0, steps=count, device=evals.device, dtype=evals.dtype
+    )
     return compute_hks(evals, evecs, scales)
 
-def normalize_positions(pos, faces=None, method='mean', scale_method='max_rad'):
+
+def normalize_positions(pos, faces=None, method="mean", scale_method="max_rad"):
     # center and unit-scale positions
 
-    if method == 'mean':
+    if method == "mean":
         # center using the average point position
-        pos = (pos - torch.mean(pos, dim=-2, keepdim=True))
-    elif method == 'bbox': 
+        pos = pos - torch.mean(pos, dim=-2, keepdim=True)
+    elif method == "bbox":
         # center via the middle of the axis-aligned bounding box
         bbox_min = torch.min(pos, dim=-2).values
         bbox_max = torch.max(pos, dim=-2).values
-        center = (bbox_max + bbox_min) / 2.
+        center = (bbox_max + bbox_min) / 2.0
         pos -= center.unsqueeze(-2)
     else:
         raise ValueError("unrecognized method")
 
-    if scale_method == 'max_rad':
+    if scale_method == "max_rad":
         scale = torch.max(norm(pos), dim=-1, keepdim=True).values.unsqueeze(-1)
         pos = pos / scale
-    elif scale_method == 'area': 
+    elif scale_method == "area":
         if faces is None:
             raise ValueError("must pass faces for area normalization")
         coords = pos[faces]
@@ -687,41 +744,50 @@ def normalize_positions(pos, faces=None, method='mean', scale_method='max_rad'):
         vec_B = coords[:, 2, :] - coords[:, 0, :]
         face_areas = torch.norm(torch.cross(vec_A, vec_B, dim=-1), dim=1) * 0.5
         total_area = torch.sum(face_areas)
-        scale = (1. / torch.sqrt(total_area))
+        scale = 1.0 / torch.sqrt(total_area)
         pos = pos * scale
     else:
         raise ValueError("unrecognized scale method")
     return pos
 
+
 # Finds the k nearest neighbors of source on target.
 # Return is two tensors (distances, indices). Returned points will be sorted in increasing order of distance.
-def find_knn(points_source, points_target, k, largest=False, omit_diagonal=False, method='brute'):
+def find_knn(
+    points_source, points_target, k, largest=False, omit_diagonal=False, method="brute"
+):
 
     if omit_diagonal and points_source.shape[0] != points_target.shape[0]:
-        raise ValueError("omit_diagonal can only be used when source and target are same shape")
+        raise ValueError(
+            "omit_diagonal can only be used when source and target are same shape"
+        )
 
-    if method != 'cpu_kd' and points_source.shape[0] * points_target.shape[0] > 1e8:
-        method = 'cpu_kd'
+    if method != "cpu_kd" and points_source.shape[0] * points_target.shape[0] > 1e8:
+        method = "cpu_kd"
         print("switching to cpu_kd knn")
 
-    if method == 'brute':
+    if method == "brute":
 
         # Expand so both are NxMx3 tensor
         points_source_expand = points_source.unsqueeze(1)
-        points_source_expand = points_source_expand.expand(-1, points_target.shape[0], -1)
+        points_source_expand = points_source_expand.expand(
+            -1, points_target.shape[0], -1
+        )
         points_target_expand = points_target.unsqueeze(0)
-        points_target_expand = points_target_expand.expand(points_source.shape[0], -1, -1)
+        points_target_expand = points_target_expand.expand(
+            points_source.shape[0], -1, -1
+        )
 
         diff_mat = points_source_expand - points_target_expand
         dist_mat = norm(diff_mat)
 
         if omit_diagonal:
-            torch.diagonal(dist_mat)[:] = float('inf')
+            torch.diagonal(dist_mat)[:] = float("inf")
 
         result = torch.topk(dist_mat, k=k, largest=largest, sorted=True)
         return result
-    
-    elif method == 'cpu_kd':
+
+    elif method == "cpu_kd":
 
         if largest:
             raise ValueError("can't do largest with cpu_kd")
@@ -732,23 +798,25 @@ def find_knn(points_source, points_target, k, largest=False, omit_diagonal=False
         # Build the tree
         kd_tree = sklearn.neighbors.KDTree(points_target_np)
 
-        k_search = k+1 if omit_diagonal else k 
+        k_search = k + 1 if omit_diagonal else k
         _, neighbors = kd_tree.query(points_source_np, k=k_search)
-        
-        if omit_diagonal: 
+
+        if omit_diagonal:
             # Mask out self element
             mask = neighbors != np.arange(neighbors.shape[0])[:, np.newaxis]
 
             # make sure we mask out exactly one element in each row, in rare case of many duplicate points
             mask[np.sum(mask, axis=1) == mask.shape[1], -1] = False
 
-            neighbors = neighbors[mask].reshape((neighbors.shape[0], neighbors.shape[1]-1))
+            neighbors = neighbors[mask].reshape(
+                (neighbors.shape[0], neighbors.shape[1] - 1)
+            )
 
         inds = torch.tensor(neighbors, device=points_source.device, dtype=torch.int64)
         dists = norm(points_source.unsqueeze(1).expand(-1, k, -1) - points_target[inds])
 
         return dists, inds
-    
+
     else:
         raise ValueError("unrecognized method")
 
@@ -757,30 +825,38 @@ def farthest_point_sampling(points, n_sample):
     # Torch in, torch out. Returns a |V| mask with n_sample elements set to true.
 
     N = points.shape[0]
-    if(n_sample > N): raise ValueError("not enough points to sample")
+    if n_sample > N:
+        raise ValueError("not enough points to sample")
 
     chosen_mask = torch.zeros(N, dtype=torch.bool, device=points.device)
-    min_dists = torch.ones(N, dtype=points.dtype, device=points.device) * float('inf')
+    min_dists = torch.ones(N, dtype=points.dtype, device=points.device) * float("inf")
 
     # pick the centermost first point
     points = normalize_positions(points)
     i = torch.min(norm2(points), dim=0).indices
     chosen_mask[i] = True
 
-    for _ in range(n_sample-1):
-        
+    for _ in range(n_sample - 1):
+
         # update distance
-        dists = norm2(points[i,:].unsqueeze(0) - points)
+        dists = norm2(points[i, :].unsqueeze(0) - points)
         min_dists = torch.minimum(dists, min_dists)
 
         # take the farthest
-        i = torch.max(min_dists,dim=0).indices.item()
+        i = torch.max(min_dists, dim=0).indices.item()
         chosen_mask[i] = True
 
     return chosen_mask
 
 
-def geodesic_label_errors(target_verts, target_faces, pred_labels, gt_labels, normalization='diameter', geodesic_cache_dir=None):
+def geodesic_label_errors(
+    target_verts,
+    target_faces,
+    pred_labels,
+    gt_labels,
+    normalization="diameter",
+    geodesic_cache_dir=None,
+):
     """
     Return a vector of distances between predicted and ground-truth lables (normalized by geodesic diameter or area)
 
@@ -788,26 +864,31 @@ def geodesic_label_errors(target_verts, target_faces, pred_labels, gt_labels, no
     """
 
     # move all to numpy cpu
-    target_verts = toNP(target_verts) 
-    target_faces = toNP(target_faces) 
+    target_verts = toNP(target_verts)
+    target_faces = toNP(target_faces)
 
-    pred_labels = toNP(pred_labels) 
-    gt_labels = toNP(gt_labels) 
+    pred_labels = toNP(pred_labels)
+    gt_labels = toNP(gt_labels)
 
-    dists = get_all_pairs_geodesic_distance(target_verts, target_faces, geodesic_cache_dir) 
+    dists = get_all_pairs_geodesic_distance(
+        target_verts, target_faces, geodesic_cache_dir
+    )
 
     result_dists = dists[pred_labels, gt_labels]
 
-    if normalization == 'diameter':
+    if normalization == "diameter":
         geodesic_diameter = np.max(dists)
         normalized_result_dists = result_dists / geodesic_diameter
-    elif normalization == 'area':
-        total_area = torch.sum(face_area(torch.tensor(target_verts), torch.tensor(target_faces)))
+    elif normalization == "area":
+        total_area = torch.sum(
+            face_area(torch.tensor(target_verts), torch.tensor(target_faces))
+        )
         normalized_result_dists = result_dists / torch.sqrt(total_area)
     else:
-        raise ValueError('unrecognized normalization')
+        raise ValueError("unrecognized normalization")
 
     return normalized_result_dists
+
 
 # This function and the helper class below are to support parallel computation of all-pairs geodesic distance
 def all_pairs_geodesic_worker(verts, faces, i):
@@ -816,16 +897,18 @@ def all_pairs_geodesic_worker(verts, faces, i):
     N = verts.shape[0]
 
     # TODO: this re-does a ton of work, since it is called independently each time. Some custom C++ code could surely make it faster.
-    sources = np.array([i])[:,np.newaxis]
-    targets = np.arange(N)[:,np.newaxis]
+    sources = np.array([i])[:, np.newaxis]
+    targets = np.arange(N)[:, np.newaxis]
     dist_vec = igl.exact_geodesic(verts, faces, sources, targets)
-    
+
     return dist_vec
-        
+
+
 class AllPairsGeodesicEngine(object):
     def __init__(self, verts, faces):
-        self.verts = verts 
-        self.faces = faces 
+        self.verts = verts
+        self.faces = faces
+
     def __call__(self, i):
         return all_pairs_geodesic_worker(self.verts, self.faces, i)
 
@@ -841,10 +924,12 @@ def get_all_pairs_geodesic_distance(verts_np, faces_np, geodesic_cache_dir=None)
     try:
         import igl
     except ImportError as e:
-        raise ImportError("Must have python libigl installed for all-pairs geodesics. `conda install -c conda-forge igl`")
+        raise ImportError(
+            "Must have python libigl installed for all-pairs geodesics. `conda install -c conda-forge igl`"
+        )
 
     # Check the cache
-    found = False 
+    found = False
     if geodesic_cache_dir is not None:
         utils.ensure_dir_exists(geodesic_cache_dir)
         hash_key_str = str(utils.hash_arrays((verts_np, faces_np)))
@@ -857,8 +942,8 @@ def get_all_pairs_geodesic_distance(verts_np, faces_np, geodesic_cache_dir=None)
 
             # Form the name of the file to check
             search_path = os.path.join(
-                geodesic_cache_dir,
-                hash_key_str + "_" + str(i_cache_search) + ".npz")
+                geodesic_cache_dir, hash_key_str + "_" + str(i_cache_search) + ".npz"
+            )
 
             try:
                 npzfile = np.load(search_path, allow_pickle=True)
@@ -866,7 +951,9 @@ def get_all_pairs_geodesic_distance(verts_np, faces_np, geodesic_cache_dir=None)
                 cache_faces = npzfile["faces"]
 
                 # If the cache doesn't match, keep looking
-                if (not np.array_equal(verts_np, cache_verts)) or (not np.array_equal(faces_np, cache_faces)):
+                if (not np.array_equal(verts_np, cache_verts)) or (
+                    not np.array_equal(faces_np, cache_faces)
+                ):
                     i_cache_search += 1
                     continue
 
@@ -879,7 +966,7 @@ def get_all_pairs_geodesic_distance(verts_np, faces_np, geodesic_cache_dir=None)
                 break
 
     if not found:
-                
+
         print("Computing all-pairs geodesic distance (warning: SLOW!)")
 
         # Not found, compute from scratch
@@ -888,24 +975,28 @@ def get_all_pairs_geodesic_distance(verts_np, faces_np, geodesic_cache_dir=None)
         N = verts_np.shape[0]
 
         try:
-            pool = Pool(None) # on 8 processors
+            pool = Pool(None)  # on 8 processors
             engine = AllPairsGeodesicEngine(verts_np, faces_np)
             outputs = pool.map(engine, range(N))
-        finally: # To make sure processes are closed in the end, even if errors happen
+        finally:  # To make sure processes are closed in the end, even if errors happen
             pool.close()
             pool.join()
 
         result_dists = np.array(outputs)
 
         # replace any failed values with nan
-        result_dists = np.nan_to_num(result_dists, nan=np.nan, posinf=np.nan, neginf=np.nan)
+        result_dists = np.nan_to_num(
+            result_dists, nan=np.nan, posinf=np.nan, neginf=np.nan
+        )
 
         # we expect that this should be a symmetric matrix, but it might not be. Take the min of the symmetric values to make it symmetric
         result_dists = np.fmin(result_dists, np.transpose(result_dists))
 
         # on rare occaisions MMP fails, yielding nan/inf; set it to the largest non-failed value if so
         max_dist = np.nanmax(result_dists)
-        result_dists = np.nan_to_num(result_dists, nan=max_dist, posinf=max_dist, neginf=max_dist)
+        result_dists = np.nan_to_num(
+            result_dists, nan=max_dist, posinf=max_dist, neginf=max_dist
+        )
 
         print("...finished computing all-pairs geodesic distance")
 
@@ -916,10 +1007,6 @@ def get_all_pairs_geodesic_distance(verts_np, faces_np, geodesic_cache_dir=None)
 
             # TODO we're potentially saving a double precision but only using a single
             # precision here; could save storage by always saving as floats
-            np.savez(search_path,
-                     verts=verts_np,
-                     faces=faces_np,
-                     dist=result_dists
-                     )
+            np.savez(search_path, verts=verts_np, faces=faces_np, dist=result_dists)
 
     return result_dists
