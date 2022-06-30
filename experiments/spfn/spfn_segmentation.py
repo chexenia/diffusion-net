@@ -75,15 +75,15 @@ def train_epoch(epoch):
         # Apply the model
         preds = model(features, mass, L=L, evals=evals, evecs=evecs, gradX=gradX, gradY=gradY, faces=faces)
 
+
         # Evaluate loss
-        print(preds.shape, labels.shape)
-        loss = torch.nn.functional.nll_loss(preds, labels)
+        loss = torch.nn.functional.cross_entropy(preds.permute(0, 2, 1), labels)
         loss.backward()
         
         # track accuracy
-        pred_labels = torch.max(preds, dim=1).indices
-        this_correct = pred_labels.eq(labels).sum().item()
-        this_num = labels.shape[0]
+        pred_labels = torch.max(preds, dim=-1).indices       
+        this_correct = torch.sum(pred_labels == labels).item()
+        this_num = labels.numel()
         correct += this_correct
         total_num += this_num
 
@@ -96,18 +96,20 @@ def train_epoch(epoch):
 
 
 # Do an evaluation pass on the test dataset 
-def evaluate(loader, save_pred=False):
+def evaluate(split, save_pred=True):
     
     model.eval()
 
+    loader = split_loaders[split]
     correct = 0
     total_num = 0
     with torch.no_grad():
     
-        for data in tqdm(loader):
+        for idx, data in enumerate(tqdm(loader)):
 
             # Get data
-            verts, faces, frames, mass, L, evals, evecs, gradX, gradY, labels, normals = data
+            verts, frames, mass, L, evals, evecs, gradX, gradY, labels, normals = data
+            faces = None
             #mpath = split_datasets['test'].get
             # Move to device
             verts = verts.to(device)
@@ -131,20 +133,20 @@ def evaluate(loader, save_pred=False):
             # Apply the model
             preds = model(features, mass, L=L, evals=evals, evecs=evecs, gradX=gradX, gradY=gradY, faces=faces)
 
-            loss = torch.nn.functional.nll_loss(preds, labels)
+            loss = torch.nn.functional.cross_entropy(preds.permute(0, 2, 1), labels)
 
             # track accuracy
-            pred_labels = torch.max(preds, dim=1).indices
-            this_correct = pred_labels.eq(labels).sum().item()
-            this_num = labels.shape[0]
+            pred_labels = torch.max(preds, dim=-1).indices       
+            this_correct = torch.sum(pred_labels == labels).item()
+            this_num = labels.numel()
             correct += this_correct
             total_num += this_num
 
             if save_pred:
                 # track accuracy
                 pred_labels = torch.max(preds, dim=1).indices.cpu().numpy()
-
-                np.savetxt(Path(mpath).with_suffix(f'.diffnet.{input_features}.txt'), pred_labels, fmt='%d')
+                mpath = save_path / split / split_datasets[split].get_path(idx)
+                np.savetxt(Path(mpath).with_suffix(".txt"), pred_labels, fmt='%d')
 
     test_acc = correct / total_num
     return test_acc, loss
@@ -169,37 +171,11 @@ def train():
         writers["test"].add_scalar(f"acc", test_acc, epoch)
         if test_acc > best_acc:
             best_acc = test_acc
-            torch.save(model.state_dict(), (save_path / model_name).with_suffix(f"best{epoch}.pth"))
+            torch.save(model.state_dict(), (save_path / model_name).with_suffix(f".best{epoch}.pth"))
 
     print(f"Finished in {time.time()-start:.2f}s.")
     print(f" ==> saving last model to {save_path}")
     torch.save(model.state_dict(), save_path / model_name.with_suffix(".last.pth"))
-
-def view():
-    print("Viewing...")
-
-    meshes = glob.glob(args.dataset_path + '/**/*.ply', recursive=True)
-    
-    def color_segments(label, n_class=8):
-        from matplotlib import pyplot
-
-        ref_colors = np.array(pyplot.get_cmap("tab20").colors)
-        idx = int(label * (ref_colors.shape[0] // n_class))
-        color = ref_colors[idx]
-
-        return color
-
-    matrix = np.eye(4)
-    matrix[:3, :3] *= 0.1
-
-    for f in meshes:
-        mesh = trimesh.load(f)
-        mesh.apply_transform(matrix)
-        mesh.show()
-        labels = np.loadtxt(Path(f).with_suffix(f'.diffnet.{input_features}.txt'))
-        face_colors = [color_segments(l) for l in labels]
-        pred_mesh = trimesh.Trimesh(mesh.vertices, mesh.faces, mesh.face_normals, mesh.vertex_normals, face_colors)
-        pred_mesh.show()
 
 def prep_one(cache_dir, dataset_path, fn):
         print(f"loading {fn}")
@@ -235,7 +211,7 @@ def prep(args):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["train", "test", "eval", "view", "prep"])
+    parser.add_argument("command", choices=["train", "test", "eval", "prep"])
     parser.add_argument("--input_features", type=str, help="what features to use as input ('xyz' or 'hks') default: hks", default = 'xyz')
     parser.add_argument("--split_path", type=Path, required=True, help="path to the split files")
     parser.add_argument("--dataset_path", type=Path, required=True, help="path to the dataset")
@@ -268,7 +244,7 @@ if __name__ == "__main__":
     decay_every = 50
     decay_rate = 0.5
     num_workers = 0
-    batch_size = 32
+    batch_size = 16
     augment_random_rotate = (input_features == 'xyz')
     n_max_instances = 256 #max number of segments for a model
     dataset_name = "spfn"
@@ -280,7 +256,10 @@ if __name__ == "__main__":
     cache_name = f"cache.diffnet.keig{k_eig}"
     save_path = args.save_path / model_name
 
-    splits = ["train", "test", "eval"]
+    if args.command == "prep" or args.command == "train":
+        splits = ["train", "test", "eval"]
+    else:
+        splits = [args.command]
 
     if args.command == "prep":
         prep(args)
@@ -296,7 +275,7 @@ if __name__ == "__main__":
         writers = {}
         for split in splits:
             split_path = args.split_path / "{}.txt".format(split)
-            split_datasets[split] = SPFNDataset(dataset_path, split_path, n_max_instances=256, noisy=True, k_eig=k_eig, input_features=input_features, use_cache=False)
+            split_datasets[split] = SPFNDataset(dataset_path, split_path, n_max_instances=256, noisy=True, k_eig=k_eig, input_features=input_features, use_cache=True)
             num_samples = len(split_datasets[split])
             writers[split] = SummaryWriter(save_path / split)
             split_samplers[split] = torch.utils.data.RandomSampler(
@@ -335,7 +314,7 @@ if __name__ == "__main__":
         elif args.command == "test":
             print("Testing...")
             evaluate(split_loaders['test'], save_pred=True)
-        elif args.command == "evaluate":
+        elif args.command == "eval":
             print("Evaluating...")
             test_acc = evaluate(split_loaders['eval'], save_pred=True)
             print("Overall accuracy: {:06.3f}%".format(100*test_acc))

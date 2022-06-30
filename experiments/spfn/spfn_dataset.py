@@ -107,7 +107,6 @@ def create_unit_data_from_hdf5(f, n_max_instances=256, noisy=True, shuffle=True)
     return result, parts
 
 def preprocess_data(fpath, k_eig=128, noisy=True, shuffle=True):
-    print(fpath)
     with h5py.File(fpath, 'r') as handle:
         data, _ = create_unit_data_from_hdf5(handle, n_max_instances=256, noisy=noisy, shuffle=shuffle)
         handle.close()
@@ -160,12 +159,11 @@ class SPFNDataset(Dataset):
 
     def __getitem__(self, idx):
         cached_data_path = (self.cache_dir / f"{self.hdf5_file_list[idx]}").with_suffix(".pt")
-        print("chached",cached_data_path)
         if self.use_cache and cached_data_path.exists():
             verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals = torch.load(cached_data_path)
         else:
             verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals = preprocess_data(self.root_dir / self.hdf5_file_list[idx], self.k_eig, self.noisy, self.shuffle)
             if self.use_cache:
                 cached_data_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals, cached_data_path)
+                torch.save((verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals), cached_data_path)
         return verts, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals
