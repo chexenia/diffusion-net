@@ -242,12 +242,7 @@ class SPFNDataset(Dataset):
     def __getitem__(self, idx):
         data = self.retrieve_cache(idx)
         if data is not None:
-            verts, faces, frames, massvec, L, evals,
-            evecs,
-            gradX,
-            gradY,
-            labels,
-            normals = data
+            verts, faces, frames, massvec, L, evals,evecs, gradX, gradY, labels, normals = data
         else:
             (
                 verts,
@@ -268,31 +263,31 @@ class SPFNDataset(Dataset):
                 self.shuffle,
             )
 
-            if self.augment_random_rotate: #FIXME: should we be doing it for verts only, what about normals?
-                verts = diffusion_net.utils.random_rotate_points(verts)
+        if self.augment_random_rotate: #FIXME: should we be doing it for verts only, what about normals?
+            verts = diffusion_net.utils.random_rotate_points(verts)
 
-            # Construct features
-            if Features.XYZ == self.in_features:
-                features = verts
-            elif Features.HKS == self.in_features:
-                features = diffusion_net.geometry.compute_hks_autoscale(evals, evecs, 16)
-            else:
-                raise ValueError(f"Unsupported feature type: {self.in_features}")
+        # Construct features
+        if Features.XYZ == self.in_features:
+            features = verts
+        elif Features.HKS == self.in_features:
+            features = diffusion_net.geometry.compute_hks_autoscale(evals, evecs, 16)
+        else:
+            raise ValueError(f"Unsupported feature type: {self.in_features}")
 
-            # for feat in Features:
-            #     if (
-            #         feat not in self.in_features
-            #         #and feat not in self.out_features
-            #         #and feat not in self.extra_features
-            #     ):
-            #         continue
-            #     if feat == Features.XYZ:
-            #         features = np.asarray(pcd.points, dtype=np.float32)
+        # for feat in Features:
+        #     if (
+        #         feat not in self.in_features
+        #         #and feat not in self.out_features
+        #         #and feat not in self.extra_features
+        #     ):
+        #         continue
+        #     if feat == Features.XYZ:
+        #         features = np.asarray(pcd.points, dtype=np.float32)
 
-            #         if self.augment:
-            #             rotation = Rotation.random()
-            #             features = rotation.apply(features)
-            self.store_cache(verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals, idx)
+        #         if self.augment:
+        #             rotation = Rotation.random()
+        #             features = rotation.apply(features)
+        self.store_cache(verts, faces, frames, massvec, L, evals, evecs, gradX, gradY, labels, normals, idx)
             
         return (
             verts,

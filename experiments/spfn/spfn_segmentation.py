@@ -9,6 +9,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 import time
 import h5py
+import random
 from tqdm import tqdm
 from pathlib import Path
 import open3d as o3d
@@ -98,7 +99,7 @@ def evaluate(split, save_pred=True, view_debug=True):
     total_num = 0
     with torch.no_grad():
 
-        for batch_idx, data in enumerate(tqdm(loader)):
+        for data in tqdm(loader):
 
             # Get data
             (
@@ -162,6 +163,8 @@ def evaluate(split, save_pred=True, view_debug=True):
                 # track accuracy
                 preds_labels = preds_labels.detach().cpu().numpy()
                 for idx, sample_idx in enumerate(indices):
+                    print(split_datasets[split].get_relpath(sample_idx))
+
                     pred_labels = preds_labels[idx, ...]
                     mpath = (
                         save_path
@@ -218,7 +221,7 @@ def train():
     for epoch in pbar:
         e_start = time.time()
         train_acc, train_loss = train_epoch(epoch)
-        test_acc, test_loss = evaluate(split_loaders["test"], save_pred=False)
+        test_acc, test_loss = evaluate("test", save_pred=False)
         pbar.write(
             f"Epoch {epoch+1}/{n_epoch} done in {time.time()-e_start}s. \n Train acc: {train_acc:0.3f} loss: {train_loss:0.3f} Test acc: {test_acc:0.3f} loss: {test_loss:0.3f}"
         )
@@ -236,7 +239,7 @@ def train():
     print(f"Finished in {time.time()-start:.2f}s.")
     print(f" ==> saving last model to {save_path}")
     torch.save(
-        model.state_dict(), save_path / "models" / model_name.with_suffix(".last.pth")
+        model.state_dict(), (save_path / "models" / model_name).with_suffix(".last.pth")
     )
 
 
@@ -321,7 +324,7 @@ if __name__ == "__main__":
     n_class = 4
 
     # model
-    in_features = Features.XYZ
+    in_features = Features.HKS
     k_eig = 128
     n_block = 4
 
@@ -350,6 +353,11 @@ if __name__ == "__main__":
         splits = ["train", "test", "eval"]
     else:
         splits = [args.command]
+
+    if args.command == "eval":
+        seed = 0
+        random.seed(seed)
+        torch.manual_seed(seed)
 
     if args.command == "prep":
         prep(args)
@@ -409,7 +417,8 @@ if __name__ == "__main__":
             train()
         else:
             print(args.command)
-            evaluate(args.command, save_pred=True)
+            test_acc, test_loss = evaluate(args.command, save_pred=True, view_debug=True)
+            print(f"{args.command} accuracy: {test_acc} loss: {test_loss}")
 
         for k, writer in writers.items():
             if writer is not None:
